@@ -3,10 +3,9 @@ from PIL import Image
 import torch
 import torchvision.transforms as T
 import cv2
-from captum.attr import LayerGradCam, LayerAttribution, GuidedBackprop, IntegratedGradients
+from captum.attr import LayerGradCam, LayerAttribution, GuidedBackprop
 import shap
 from skimage.segmentation import slic
-from skimage.color import gray2rgb
 
 transform = T.Compose([
     T.Resize((224,224)),
@@ -20,6 +19,13 @@ def to_numpy_img(pil_img, size=(224,224)):
 
 class XAIProcessor:
     def __init__(self, model, device, target_layer=None, model_type='resnet'):
+        """
+        model: the PyTorch model object. If your model stores backbone as `.net` (ResNet wrapper used in project),
+               the code will attempt to use model.net for LayerGradCam. For ViT-type models set model_type='vit'
+               and provide a target_layer if needed (or use attention_rollout).
+        device: torch.device
+        model_type: 'resnet' or 'vit'
+        """
         self.model = model
         self.device = device
         self.model.to(self.device)
@@ -29,70 +35,71 @@ class XAIProcessor:
             try:
                 self.target_layer = self.model.net.layer4[-1].conv3
             except Exception:
-                raise ValueError('Could not find target layer for provided model. Supply target_layer.')
+                self.target_layer = None
         else:
             self.target_layer = target_layer
 
     def _preprocess_pil(self, pil):
         return transform(pil).unsqueeze(0)
-    
-    def gradcam(self, pil_image, target_class=None, unsample_size=(224,224)):
+
+    def gradcam(self, pil_image, target_class=None, upsample_size=(224,224)):
         """Return normalized heatmap (H,W) in [0,1]"""
         inp = self._preprocess_pil(pil_image).to(self.device)
-        if self.model_type == 'resnet' and self.target_layer is None:
-            raise ValueError('target_layer required for gradcam on this model')
-        lgc = LayerGradCam(self.model.net if hasattr(self.model,'net') else self.model, self.target_layer)
+        net_for_attr = self.model.net if hasattr(self.model,'net') else self.model
+        if self.target_layer is None:
+            raise ValueError('target_layer must be provided for gradcam with this model')
+        lgc = LayerGradCam(net_for_attr, self.target_layer)
         with torch.no_grad():
-            logits = self.model(inp.to(self.device))
+            logits = net_for_attr(inp)
             if target_class is None:
-                target_class = int(torch.argmax(logits, dim=1). item())
-        attr = lgc.attribute(inp.to(self.device), target=target_class)
-
+                target_class = int(torch.argmax(logits, dim=1).item())
+        attr = lgc.attribute(inp, target=target_class)
         attr = LayerAttribution.interpolate(attr, upsample_size)
         heat = attr.squeeze().cpu().detach().numpy()
+        heat = np.maximum(heat, 0.0)
         heat = (heat - heat.min()) / (heat.max() - heat.min() + 1e-9)
         return heat
-    
-    def guided_gradcam(self, pil_image, target_class=None):
-        """Create a guided grad-cam overlay image"""
 
+    def guided_gradcam(self, pil_image, target_class=None):
+        """Return guided gradcam map (H,W,C normalized 0..1)"""
         inp = self._preprocess_pil(pil_image).to(self.device)
-        gbp = GuidedBackprop(self.model.net if hasattr(self.model,'net') else self.model)
-        if target_class is None:
-            with torch.no_grad():
-                logits = self.model(inp)
+        net_for_attr = self.model.net if hasattr(self.model,'net') else self.model
+        gbp = GuidedBackprop(net_for_attr)
+        with torch.no_grad():
+            logits = net_for_attr(inp)
+            if target_class is None:
                 target_class = int(torch.argmax(logits, dim=1).item())
         gb = gbp.attribute(inp, target=target_class)
         gb = gb.squeeze().cpu().detach().numpy()
         gb = np.transpose(gb, (1,2,0))
         gb = (gb - gb.min()) / (gb.max()-gb.min()+1e-9)
-       
         gc = self.gradcam(pil_image, target_class)
         gc = np.expand_dims(gc, axis=2)
         guided = gb * gc
         guided = (guided - guided.min()) / (guided.max()-guided.min()+1e-9)
         return guided
-    
+
     def shap_gradient_explainer(self, pil_image, background_images, nsamples=50):
-        """Use shap.GradientExplainer or DeepExplainer depending on model compatibility. 
-        background_images: list of PIL images (small set) 
-        returns heatmap HxW normalized
+        """
+        Try shap.GradientExplainer (fast). If it fails, fallback to superpixel KernelSHAP.
+        background_images: list of PIL images (small set, e.g., 5-20)
+        Returns heatmap HxW normalized.
         """
         try:
             def f(x):
                 x_t = torch.tensor(x).permute(0,3,1,2).float().to(self.device)
                 with torch.no_grad():
                     out = self.model(x_t)
-                return out.cpu().numpy()
-            bg_np = np.stack([to_numpy_img(im) for im in background_images])
-            bg_np = bg_np.astype(np.float32)
+                    probs = torch.softmax(out, dim=1).cpu().numpy()
+                return probs
+
+            bg_np = np.stack([to_numpy_img(im) for im in background_images]).astype(np.float32)
             explainer = shap.GradientExplainer(f, bg_np[:min(len(bg_np),10)])
             inp_np = to_numpy_img(pil_image)[None].astype(np.float32)
             shap_vals = explainer.shap_values(inp_np, nsamples=nsamples)
-
             sv = np.sum(np.array(shap_vals), axis=-1)
             sv = sv[0]
-            sv = (sv - sv.min()) / (sv.max() - sv.min() + 1e-9)
+            sv = (sv - sv.min()) / (sv.max()-sv.min()+1e-9)
             return sv
         except Exception as e:
             print('GradientExplainer failed, falling back to superpixel KernelSHAP:', e)
@@ -100,72 +107,89 @@ class XAIProcessor:
 
     def shap_superpixel(self, pil_image, n_segments=100, nsamples=200):
         """
-        Superpixel KernelSHAP: segments image into superpixels and explains
-        importance of each superpixel.
-        Returns per-pixel heatmap (upsampled from segments)
+        Superpixel KernelSHAP: segment image into superpixels and estimate importance per segment.
+        Returns upsampled per-pixel heatmap.
+        NOTE: This is an approximation and uses linear regression to estimate segment weights.
         """
         img_np = to_numpy_img(pil_image)
-        segments = slic(img_np, n_segments=n_segments, compactness=10, sigma=1)
-
-        def masker(segments_mask, image, segments):
-            out = image.copy()
-            for seg_id in np.unique(segments):
-                if segments_mask[seg_id] == 0:
-                    out[segments==seg_id] = np.mean(image, axis=(0,1))
+        segments = slic(img_np, n_segments=n_segments, compactness=10, sigma=1, start_label=0)
+        num_segs = segments.max() + 1
+        avg_color = img_np.mean(axis=(0,1))
+        def masker(mask_vec):
+            out = img_np.copy()
+            for seg_id in range(num_segs):
+                if mask_vec[seg_id] == 0:
+                    out[segments == seg_id] = avg_color
             return out
-        
-        def f(images):
-            x = np.stack(images).astype(np.float32)
-            x = torch.tensor(x).permute(0,3,1,2).float().to(self.device)
-            with torch.no_grad():
-                out = self.model(x)
-                probs = torch.softmax(out, dim=1).cpu().numpy()
-            return probs
-        
-        num_segs = segments.max()+1
 
         import random
-        sampled_masks = []
-        sampled_imgs = []
+        X = []
+        y = []
+        B = min(50, nsamples) 
+        masks_sampled = []
         for _ in range(nsamples):
-            mask = np.random.choice([0,1], size=(num_segs,), p=[0.5,0.5])
-            sampled_masks.append(mask)
-            sampled_imgs.append(masker(mask, img_np, segments))
-        probs = f(sampled_imgs) 
-        X = np.stack(sampled_masks).astype(np.float32)
-        y = probs[:,1]
-        reg = 1e-3
-        w, *_ = np.linalg.lstsq(X.T.dot(X) + reg*np.eye(num_segs), X.T.dot(y), rcond=None)
+            mask = np.random.choice([0,1], size=(num_segs,), p=[0.5,0.5]).astype(np.float32)
+            masks_sampled.append(mask)
+        imgs_to_eval = [masker(m) for m in masks_sampled]
+
+        def f(images):
+            x = np.stack(images).astype(np.float32)
+            x_tensor = torch.tensor(x).permute(0,3,1,2).float().to(self.device)
+            with torch.no_grad():
+                out = self.model(x_tensor)
+                probs = torch.softmax(out, dim=1).cpu().numpy()
+            return probs[:,1]  
+        probs = f(imgs_to_eval)
+        X = np.stack(masks_sampled).astype(np.float32)
+        y = probs.astype(np.float32)
+     
+        lam = 1e-3
+        A = X.T.dot(X) + lam * np.eye(num_segs)
+        b = X.T.dot(y)
+        try:
+            w = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            w = np.linalg.lstsq(A, b, rcond=None)[0]
+      
         heat = np.zeros_like(segments, dtype=np.float32)
         for seg_id in range(num_segs):
-            heat[segments==seg_id] = w[seg_id]
-        heat = (heat - heat.min()) / (heat.max()-heat.min()+1e-9)
+            heat[segments == seg_id] = w[seg_id]
+        heat = (heat - heat.min()) / (heat.max() - heat.min() + 1e-9)
         return heat
-    
+
     def vit_attention_rollout(self, pil_image, discard_ratio=0.9):
-        """Compute attention rollout for ViT-like models. Returns heatmap HxW"""
+        """
+        Attention rollout for ViT-like models. Works if model exposes attention maps during forward.
+        This implementation tries to attach hooks to layers named with 'attn' or similar (best-effort).
+        Returns heatmap 224x224 in [0,1].
+        """
         try:
             x = self._preprocess_pil(pil_image).to(self.device)
             attn_weights = []
             def save_attn(module, inp, out):
+                
+                if isinstance(out, tuple):
+                    out = out[0]
                 attn_weights.append(out.detach().cpu().numpy())
             hooks = []
             for name, module in self.model.named_modules():
-                if name.endswith('attn') or 'attn' in name:
-                    hooks.append(module.register_forward_hook(save_attn))
+                if 'attn' in name.lower() or 'attention' in name.lower():
+                    try:
+                        hooks.append(module.register_forward_hook(save_attn))
+                    except Exception:
+                        pass
             _ = self.model(x)
             for h in hooks:
                 h.remove()
             if len(attn_weights) == 0:
-                raise RuntimeError('No attention weights captured')
+                raise RuntimeError('No attention weights captured.')
             rollout = np.eye(attn_weights[0].shape[-1])
             for a in attn_weights:
-                a_mean = a.mean(axis=1)[0]
-                a_mean[a_mean < np.percentile(a_mean, discard_ratio*100)] = 0
+                a_mean = a.mean(axis=1)[0]  
                 a_mean = a_mean + np.eye(a_mean.shape[0])
                 a_mean = a_mean / a_mean.sum(axis=-1, keepdims=True)
                 rollout = a_mean.dot(rollout)
-            mask = rollout[0,1:]
+            mask = rollout[0,1:] 
             size = int(np.sqrt(mask.shape[0]))
             heat = mask.reshape(size, size)
             heat = cv2.resize(heat, (224,224))
@@ -174,7 +198,7 @@ class XAIProcessor:
         except Exception as e:
             print('Attention rollout failed:', e)
             return np.zeros((224,224), dtype=np.float32)
-        
+
 def overlay_heatmap(pil_img, heatmap, colormap=cv2.COLORMAP_JET, alpha=0.6):
     arr = np.array(pil_img.resize((heatmap.shape[1], heatmap.shape[0])))
     h = (heatmap*255).astype(np.uint8)
