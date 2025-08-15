@@ -12,10 +12,25 @@ from torch.utils.data import DataLoader
 import torchvision.transforms as T
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+import logging
+from torch.utils.tensorboard import SummaryWriter
+
 from src.datasets import PatchDataset
 from src.models import ResNet50Fine, ViTModel
 from src.metrics import iou_from_masks
 from src.xai import XAIProcessor
+
+def setup_logging(experiment_name):
+    log_dir = os.path.join('experiments', experiment_name)
+    os.makedirs(log_dir, exist_ok=True)
+    logging.basicConfig(
+        filename=os.path.join(log_dir, 'train.log'),
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s:%(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    writer = SummaryWriter(log_dir)
+    return writer
 
 def get_device():
     if torch.backends.mps.is_available():
@@ -78,6 +93,9 @@ class Trainer:
 
         self.best_val = 0.0
 
+        experiment_name = cfg['training'].get('experiment_name', 'default_exp')
+        self.writer = setup_logging(experiment_name)
+
     def train_epoch(self, epoch):
         self.model.train()
         running_loss = 0.0
@@ -119,7 +137,10 @@ class Trainer:
 
             running_loss += loss.item()
             loop.set_postfix(train_loss=running_loss/(loop.n+1))
-        return running_loss / len(self.train_loader)
+        train_loss = running_loss / len(self.train_loader)
+        logging.info(f"Epoch {epoch} Train Loss: {train_loss:.4f}")
+        self.writer.add_scalar("Loss/train", train_loss, epoch)
+        return train_loss
 
     def validate(self, epoch):
         self.model.eval()
@@ -135,8 +156,12 @@ class Trainer:
                 _, p = preds.max(1)
                 correct += (p == labels).sum().item()
                 total += labels.size(0)
+        val_loss = float(np.mean(losses))
         acc = correct / total if total > 0 else 0.0
-        return float(np.mean(losses)), float(acc)
+        logging.info(f"Epoch {epoch} Val Loss: {val_loss:.4f} Val Acc: {acc:.4f}")
+        self.writer.add_scalar("Loss/val", val_loss, epoch)
+        self.writer.add_scalar("Accuracy/val", acc, epoch)
+        return val_loss, float(acc)
 
     def fit(self):
         epochs = self.cfg['training']['epochs']
@@ -156,6 +181,7 @@ class Trainer:
                 save_path = os.path.join(self.cfg['training']['outdir'], f'last_epoch_{epoch}_{self.cfg["model"]["type"]}.pt')
                 torch.save(self.model.state_dict(), save_path)
             print('Elapsed', time.time()-t0, 'sec')
+        self.writer.close()
 
 if __name__ == '__main__':
     cfg = yaml.safe_load(open('configs/default.yaml'))
