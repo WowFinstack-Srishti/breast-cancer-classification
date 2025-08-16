@@ -1,3 +1,11 @@
+"""
+Tkinter UI to load an image, run model inference, and show Grad-CAM and SHAP overlays side-by-side.
+Features:
+ - Load image from disk
+ - Run model inference (ResNet or ViT)
+ - Compute Grad-CAM and SHAP (superpixel fallback)
+ - Side-by-side display, opacity slider, export overlays
+"""
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
@@ -23,6 +31,7 @@ class XAIApp:
         self.cfg = cfg
         self.device = get_device()
 
+        # UI layout
         master.title('Breast Histopathology XAI Tool')
         self.top_frame = tk.Frame(master)
         self.top_frame.pack(fill='both', expand=True)
@@ -54,18 +63,18 @@ class XAIApp:
         self.status_label = tk.Label(master, text='Status: Ready')
         self.status_label.pack(side='bottom', fill='x')
 
-        
+        #model load
         self.model = None
         self.xai = None
         self._load_model()
 
-        
+        #placeholders
         self.img = None
         self.grad_overlay = None
         self.shap_overlay = None
 
     def _load_model(self):
-        
+        # load config-specified model and checkpoint
         model_type = self.cfg['model']['type']
         try:
             if model_type == 'resnet':
@@ -107,7 +116,7 @@ class XAIApp:
     def compute_xai(self):
         self.status_label.config(text='Status: Computing XAI...')
         try:
-            
+            # Grad-CAM
             grad_map = None
             shap_map = None
             try:
@@ -116,10 +125,11 @@ class XAIApp:
                 print('Grad-CAM failed:', e)
                 grad_map = np.zeros((224,224), dtype=np.float32)
 
+            # For SHAP choose a small set of background images: use a few random training patches if available
             bg_dir = self.cfg['data'].get('bg_dir', None)
             background_images = []
             if bg_dir and os.path.isdir(bg_dir):
-            
+                # pick up to 5 images randomly
                 import random
                 fls = [f for f in os.listdir(bg_dir) if f.lower().endswith(('.png','.jpg','.jpeg'))]
                 random.shuffle(fls)
@@ -129,6 +139,7 @@ class XAIApp:
                     except Exception:
                         pass
            
+           # fallback: reuse input image as background (not ideal but works)
             if len(background_images) == 0:
                 background_images = [self.img]
 
@@ -138,10 +149,12 @@ class XAIApp:
                 print('SHAP failed:', e)
                 shap_map = self.xai.shap_superpixel(self.img, n_segments=80, nsamples=120)
 
+            # overlay creation based on opacity slider
             alpha = float(self.opacity_scale.get()) / 100.0
             self.grad_overlay = overlay_heatmap(self.img, grad_map, alpha=alpha)
             self.shap_overlay = overlay_heatmap(self.img, shap_map, alpha=alpha)
 
+            # update UI thumbnails
             left_thumb = self.grad_overlay.resize((384,384))
             right_thumb = self.shap_overlay.resize((384,384))
             self.left_tk = ImageTk.PhotoImage(left_thumb)

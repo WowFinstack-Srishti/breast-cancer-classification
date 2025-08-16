@@ -20,6 +20,7 @@ openslide-python
 #ui
 tk
 
+#optional
 tensorboard
 scipy
 seaborn

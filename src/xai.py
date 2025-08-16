@@ -1,3 +1,14 @@
+"""
+Polished XAI utilities:
+- Grad-CAM via Captum (LayerGradCam)
+- Guided Grad-CAM (combination) for visualization
+- GradientExplainer/DeepExplainer wrapper for Deep models
+- Superpixel-based KernelSHAP for images (uses skimage.slic)
+- Attention rollout for transformers (ViT)
+Notes:
+- KernelSHAP on pixels is prohibitively slow; superpixel approach reduces complexity.
+- GradientExplainer (shap) or DeepExplainer is preferred for deep models when available.
+"""
 import numpy as np
 from PIL import Image
 import torch
@@ -7,6 +18,7 @@ from captum.attr import LayerGradCam, LayerAttribution, GuidedBackprop
 import shap
 from skimage.segmentation import slic
 
+# basic transform
 transform = T.Compose([
     T.Resize((224,224)),
     T.ToTensor(),
@@ -32,6 +44,7 @@ class XAIProcessor:
         self.model.eval()
         self.model_type = model_type
         if target_layer is None and model_type == 'resnet':
+            # default last conv for ResNet
             try:
                 self.target_layer = self.model.net.layer4[-1].conv3
             except Exception:
@@ -54,6 +67,7 @@ class XAIProcessor:
             if target_class is None:
                 target_class = int(torch.argmax(logits, dim=1).item())
         attr = lgc.attribute(inp, target=target_class)
+        # interpolate to desired size
         attr = LayerAttribution.interpolate(attr, upsample_size)
         heat = attr.squeeze().cpu().detach().numpy()
         heat = np.maximum(heat, 0.0)
@@ -62,6 +76,7 @@ class XAIProcessor:
 
     def guided_gradcam(self, pil_image, target_class=None):
         """Return guided gradcam map (H,W,C normalized 0..1)"""
+        # guided backprop
         inp = self._preprocess_pil(pil_image).to(self.device)
         net_for_attr = self.model.net if hasattr(self.model,'net') else self.model
         gbp = GuidedBackprop(net_for_attr)
@@ -73,6 +88,7 @@ class XAIProcessor:
         gb = gb.squeeze().cpu().detach().numpy()
         gb = np.transpose(gb, (1,2,0))
         gb = (gb - gb.min()) / (gb.max()-gb.min()+1e-9)
+        # gradcam
         gc = self.gradcam(pil_image, target_class)
         gc = np.expand_dims(gc, axis=2)
         guided = gb * gc
@@ -86,7 +102,9 @@ class XAIProcessor:
         Returns heatmap HxW normalized.
         """
         try:
+            # try GradientExplainer (works with some torch models)
             def f(x):
+                # x: batch HWC numpy
                 x_t = torch.tensor(x).permute(0,3,1,2).float().to(self.device)
                 with torch.no_grad():
                     out = self.model(x_t)
@@ -97,11 +115,13 @@ class XAIProcessor:
             explainer = shap.GradientExplainer(f, bg_np[:min(len(bg_np),10)])
             inp_np = to_numpy_img(pil_image)[None].astype(np.float32)
             shap_vals = explainer.shap_values(inp_np, nsamples=nsamples)
+            # shap_vals: classes x H x W x C
             sv = np.sum(np.array(shap_vals), axis=-1)
             sv = sv[0]
             sv = (sv - sv.min()) / (sv.max()-sv.min()+1e-9)
             return sv
         except Exception as e:
+            # fallback to KernelSHAP on superpixels
             print('GradientExplainer failed, falling back to superpixel KernelSHAP:', e)
             return self.shap_superpixel(pil_image, n_segments=100, nsamples=200)
 
@@ -115,13 +135,17 @@ class XAIProcessor:
         segments = slic(img_np, n_segments=n_segments, compactness=10, sigma=1, start_label=0)
         num_segs = segments.max() + 1
         avg_color = img_np.mean(axis=(0,1))
+        # background for KernelSHAP: mean image of dataset or black
         def masker(mask_vec):
+            # segments_mask is a binary vector of kept segments (1 means keep)
             out = img_np.copy()
             for seg_id in range(num_segs):
                 if mask_vec[seg_id] == 0:
                     out[segments == seg_id] = avg_color
             return out
 
+        # build masker samples
+        # random sample of masks
         import random
         X = []
         y = []
@@ -132,6 +156,13 @@ class XAIProcessor:
             masks_sampled.append(mask)
         imgs_to_eval = [masker(m) for m in masks_sampled]
 
+        # model function for shap (takes list of images HWC numpy)
+        # get model outputs, # nsamples x num_classes
+        # approximate per-segment importance via linear regression
+        # Build X matrix (nsamples x num_segs)
+        # target: prob for positive class (assume class 1)
+        # solve least squares with regularization
+        # map segment weights to pixels
         def f(images):
             x = np.stack(images).astype(np.float32)
             x_tensor = torch.tensor(x).permute(0,3,1,2).float().to(self.device)
@@ -165,12 +196,14 @@ class XAIProcessor:
         """
         try:
             x = self._preprocess_pil(pil_image).to(self.device)
+            # get attentions via forward hook if model provides
             attn_weights = []
             def save_attn(module, inp, out):
-                
+                # out expected shape: (B, num_heads, seq_len, seq_len)
                 if isinstance(out, tuple):
                     out = out[0]
                 attn_weights.append(out.detach().cpu().numpy())
+            # Attempt to attach to transformer blocks (timm ViT uses blocks)
             hooks = []
             for name, module in self.model.named_modules():
                 if 'attn' in name.lower() or 'attention' in name.lower():
@@ -183,13 +216,18 @@ class XAIProcessor:
                 h.remove()
             if len(attn_weights) == 0:
                 raise RuntimeError('No attention weights captured.')
+            # attn_weights: list of arrays
+            # rollout: start with identity
             rollout = np.eye(attn_weights[0].shape[-1])
             for a in attn_weights:
+                # average heads
                 a_mean = a.mean(axis=1)[0]  
                 a_mean = a_mean + np.eye(a_mean.shape[0])
                 a_mean = a_mean / a_mean.sum(axis=-1, keepdims=True)
                 rollout = a_mean.dot(rollout)
+            # take rollout for class token attention to patches
             mask = rollout[0,1:] 
+            # reshape to square
             size = int(np.sqrt(mask.shape[0]))
             heat = mask.reshape(size, size)
             heat = cv2.resize(heat, (224,224))
@@ -199,6 +237,7 @@ class XAIProcessor:
             print('Attention rollout failed:', e)
             return np.zeros((224,224), dtype=np.float32)
 
+# utility: overlay heatmap on pil image
 def overlay_heatmap(pil_img, heatmap, colormap=cv2.COLORMAP_JET, alpha=0.6):
     arr = np.array(pil_img.resize((heatmap.shape[1], heatmap.shape[0])))
     h = (heatmap*255).astype(np.uint8)
