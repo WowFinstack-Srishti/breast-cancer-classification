@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report, confusion_matrix
 import pandas as pd
-from dataset import HistopathologyDataset
+from datasets import PatchDataset
 from utils import get_device
 
 def evaluate_model(model, dataset_csv, transforms, batch_size=32):
@@ -10,7 +10,7 @@ def evaluate_model(model, dataset_csv, transforms, batch_size=32):
     model.eval()
     model.to(device)
 
-    dataset = HistopathologyDataset(dataset_csv, transforms=transforms)
+    dataset = PatchDataset(dataset_csv, transforms=transforms)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     all_preds = []
