@@ -1,3 +1,9 @@
+"""
+Training script with augmentations, scheduler, checkpointing, optional
+explainability regularizer
+(uses Grad-CAM during training to compute an explainability loss when masks are
+available).
+"""
 import os
 import time
 import yaml
@@ -85,7 +91,9 @@ class Trainer:
 
         self.xai_reg = cfg['training'].get('use_xai_reg', False)
         if self.xai_reg:
+            # XAIProcessor expects a model wrapper; for resnet we point to last conv by default
             self.xai_processor = XAIProcessor(self.model, self.device, model_type=cfg['model']['type'])
+            # path to masks csv (optional)
             self.masks_root = cfg['data'].get('masks_root', None)
             if self.masks_root is None:
                 print('Warning: XAI regularizer enabled but masks_root not provided. Turning off XAI reg.')
@@ -106,13 +114,19 @@ class Trainer:
             preds = self.model(imgs)
             loss = self.criterion(preds, labels)
 
+            # explainability regularizer (optional): compute grad-cam per image and compare with mask
+
             if self.xai_reg:
+                # compute per-sample gradcam heatmaps and IoU against mask (if mask available) and add term
                 reg_losses = []
                 for i in range(imgs.size(0)):
                     fname = filenames[i]
+                    # expected mask file naming convention: <filename>_mask.png or use a csv mapping
                     mask_path = os.path.join(self.masks_root, fname.replace('.png','_mask.png'))
                     if not os.path.exists(mask_path):
+                        # fallback: skip
                         continue
+                    # compute Grad-CAM for single image
                     try:
                         pil = Image.open(os.path.join(self.train_ds.img_dir, fname)).convert('RGB')
                     except Exception:
@@ -121,6 +135,7 @@ class Trainer:
                         heat = self.xai_processor.gradcam(pil, target_class=None, upsample_size=(224,224))
                     except Exception:
                         continue
+                    # if gradcam fails (e.g., for ViT), skip
                     mask = np.array(Image.open(mask_path).convert('L').resize((heat.shape[1], heat.shape[0])))
                     mask = (mask>127).astype(np.float32)
                     iou = iou_from_masks(heat, mask, thresh=0.5)
