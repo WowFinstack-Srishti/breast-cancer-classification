@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from sklearn.metrics import roc_auc_score
 
 def iou_from_masks(pred_mask, true_mask, thresh=0.5):
@@ -46,5 +47,5 @@ def deletion_insertion_score(model, img_pil, heatmap, device, metric='auc', step
             prob = torch.softmax(out, dim=1).cpu().numpy()[0,1]
         scores.append(prob)
     # compute AUC-like area under curve
-    auc = np.trapz(scores) / len(scores)
+    auc = np.trapzoid(scores) / len(scores)
     return auc
