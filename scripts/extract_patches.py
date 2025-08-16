@@ -1,3 +1,4 @@
+#simple tiling for whole slide images (WSI) using openslide
 import os
 import openslide
 from PIL import Image
@@ -13,6 +14,7 @@ def tile_wsi(wsi_path, out_dir, patch_size=224, level=0, stride=224, bg_thresh=0
         for x in range(0, width - patch_size + 1, stride):
             patch = slide.read_region((x, y), level, (patch_size, patch_size)).convert("RGB")
             arr = np.array(patch)
+            # background filter: fraction of nearly-white pixels
             white_frac= np.mean(np.all(arr>240, axis=2))
             if white_frac > bg_thresh:
                 continue
