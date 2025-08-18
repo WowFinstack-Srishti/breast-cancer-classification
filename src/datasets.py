@@ -22,6 +22,6 @@ class PatchDataset(Dataset):
         row = self.df.iloc[idx]
         img_path = os.path.join(self.img_dir, row['filename'])
         image = Image.open(img_path).convert('RGB')
-        img = self.transform(img)
+        img = self.transform(image)
         label = int(row['label'])
         return img, label, row['filename']
