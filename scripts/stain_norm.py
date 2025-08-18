@@ -36,7 +36,7 @@ def normalize_staining(img, Io=240, alpha=1, beta=0.15):
     HE = np.array([v1, v2]).T  # shape (3,2)
 
     # Concentrations
-    C = np.dot(OD, np.linalg.pinv(HE))
+    C = np.dot(OD, np.linalg.pinv(HE.T))
     maxC = np.array([
         np.percentile(C[:, 0], 99),
         np.percentile(C[:, 1], 99)
