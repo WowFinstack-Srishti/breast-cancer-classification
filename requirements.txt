@@ -25,3 +25,4 @@ tk
 tensorboard
 scipy
 seaborn
+h5py
