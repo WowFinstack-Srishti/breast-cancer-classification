@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import os
 import h5py
 import random
@@ -8,7 +7,7 @@ from PIL import Image
 from sklearn.model_selection import train_test_split
 import pandas as pd
 
-from stain_norm import normalize_staining  # keep stain_norm.py in src/
+from stain_norm import normalize_staining 
 
 def ensure_rgb(img):
     """Ensure image is RGB numpy array."""
