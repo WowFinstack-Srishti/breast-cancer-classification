@@ -7,13 +7,13 @@ data:
 
 model:
   type: resnet   # or vit
-  num_classes: 4  # adjust based on datasets (PCam=2, BreakHis=2, BACH=4)
+  num_classes: 2  # adjust based on datasets (PCam=2, BreakHis=2, BACH=4)
 
 training:
   outdir: experiments/exp1
   batch_size: 32
-  lr: 1e-4
+  lr: 0.0001
   epochs: 50
-  weight_decay: 1e-4
+  weight_decay: 0.0001
   experiment_name: exp1_resnet50
   use_xai_reg: false   # start simple, you can enable later
