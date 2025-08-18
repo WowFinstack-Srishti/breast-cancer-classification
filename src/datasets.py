@@ -8,7 +8,7 @@ class PatchDataset(Dataset):
     def __init__(self, csv_file, img_dir, transform=None):
         self.df = pd.read_csv(csv_file)
         self.img_dir = img_dir
-        self.transform = transform or T.Compost([
+        self.transform = transform or T.Compose([
             T.Resize((224,224)),
             T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406],
