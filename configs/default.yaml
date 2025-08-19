@@ -1,15 +1,19 @@
 data:
-  img_dir: 'data/processed/patches'
-  train_csv: 'data/processed/train.csv'
-  val_csv: 'data/processed/val.csv'
+  train_csv: data/processed/train.csv
+  val_csv: data/processed/val.csv
+  test_csv: data/processed/test.csv
+  img_dir: data/processed/patches
+  img_size: 224
 
 model:
-  type: 'resnet' # or 'vit'
-  num_classes: 2
-  vit_name: 'vit_base_patch16_224'
-  
+  type: resnet   # or vit
+  num_classes: 2  # adjust based on datasets (PCam=2, BreakHis=2, BACH=4)
+
 training:
-  epochs: 10
+  outdir: experiments/exp1
   batch_size: 32
-  lr: 3e-4
-  outdir: 'experiments/logs'
+  lr: 0.0001
+  epochs: 50
+  weight_decay: 0.0001
+  experiment_name: exp1_resnet50
+  use_xai_reg: false   # start simple, you can enable later
