@@ -91,16 +91,13 @@ class Trainer:
 
         self.xai_reg = cfg['training'].get('use_xai_reg', False)
         if self.xai_reg:
-            # XAIProcessor expects a model wrapper; for resnet we point to last conv by default
             self.xai_processor = XAIProcessor(self.model, self.device, model_type=cfg['model']['type'])
-            # path to masks csv (optional)
             self.masks_root = cfg['data'].get('masks_root', None)
             if self.masks_root is None:
                 print('Warning: XAI regularizer enabled but masks_root not provided. Turning off XAI reg.')
                 self.xai_reg = False
 
         self.best_val = 0.0
-
         experiment_name = cfg['training'].get('experiment_name', 'default_exp')
         self.writer = setup_logging(experiment_name)
 
@@ -114,33 +111,22 @@ class Trainer:
             preds = self.model(imgs)
             loss = self.criterion(preds, labels)
 
-            # explainability regularizer (optional): compute grad-cam per image and compare with mask
-
             if self.xai_reg:
-                # compute per-sample gradcam heatmaps and IoU against mask (if mask available) and add term
                 reg_losses = []
                 for i in range(imgs.size(0)):
                     fname = filenames[i]
-                    # expected mask file naming convention: <filename>_mask.png or use a csv mapping
                     mask_path = os.path.join(self.masks_root, fname.replace('.png','_mask.png'))
                     if not os.path.exists(mask_path):
-                        # fallback: skip
                         continue
-                    # compute Grad-CAM for single image
                     try:
                         pil = Image.open(os.path.join(self.train_ds.img_dir, fname)).convert('RGB')
-                    except Exception:
-                        continue
-                    try:
                         heat = self.xai_processor.gradcam(pil, target_class=None, upsample_size=(224,224))
                     except Exception:
                         continue
-                    # if gradcam fails (e.g., for ViT), skip
                     mask = np.array(Image.open(mask_path).convert('L').resize((heat.shape[1], heat.shape[0])))
                     mask = (mask>127).astype(np.float32)
                     iou = iou_from_masks(heat, mask, thresh=0.5)
-                    reg = 1.0 - iou
-                    reg_losses.append(reg)
+                    reg_losses.append(1.0 - iou)
                 if len(reg_losses) > 0:
                     reg_loss = float(np.mean(reg_losses))
                     loss = loss + self.cfg['training'].get('xai_reg_lambda', 1.0) * reg_loss
@@ -178,27 +164,53 @@ class Trainer:
         self.writer.add_scalar("Accuracy/val", acc, epoch)
         return val_loss, float(acc)
 
-    def fit(self):
+    def fit(self, resume_path=None):
         epochs = self.cfg['training']['epochs']
-        for epoch in range(1, epochs+1):
+        start_epoch = 1
+
+        # Resume training if checkpoint is provided
+        if resume_path is not None and os.path.exists(resume_path):
+            checkpoint = torch.load(resume_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint["model_state"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+            self.scheduler.load_state_dict(checkpoint["scheduler_state"])
+            self.best_val = checkpoint.get("best_val", 0.0)
+            start_epoch = checkpoint.get("epoch", 1)
+            print(f"Resumed from {resume_path} at epoch {start_epoch}")
+
+        for epoch in range(start_epoch, epochs+1):
             t0 = time.time()
             train_loss = self.train_epoch(epoch)
             val_loss, val_acc = self.validate(epoch)
             self.scheduler.step()
             print(f'Epoch {epoch} | Train loss {train_loss:.4f} | Val loss {val_loss:.4f} | Val acc {val_acc:.4f}')
+
+            # Save best model
             if val_acc > self.best_val:
                 self.best_val = val_acc
-                save_path = os.path.join(self.cfg['training']['outdir'], f'best_{self.cfg["model"]["type"]}.pt')
-                torch.save(self.model.state_dict(), save_path)
-                print('Saved', save_path)
-          
-            if epoch % max(1, min(5, epochs//5)) == 0:
-                save_path = os.path.join(self.cfg['training']['outdir'], f'last_epoch_{epoch}_{self.cfg["model"]["type"]}.pt')
-                torch.save(self.model.state_dict(), save_path)
+                best_path = os.path.join(self.cfg['training']['outdir'], f'best_{self.cfg["model"]["type"]}.pt')
+                torch.save(self.model.state_dict(), best_path)
+                print('Saved best model at', best_path)
+
+            # Always save last checkpoint
+            last_path = os.path.join(self.cfg['training']['outdir'], "last_epoch.pt")
+            torch.save({
+                "epoch": epoch + 1,  # next epoch to start
+                "model_state": self.model.state_dict(),
+                "optimizer_state": self.optimizer.state_dict(),
+                "scheduler_state": self.scheduler.state_dict(),
+                "best_val": self.best_val,
+            }, last_path)
+            print("Saved checkpoint at", last_path)
+
             print('Elapsed', time.time()-t0, 'sec')
         self.writer.close()
 
 if __name__ == '__main__':
     cfg = yaml.safe_load(open('configs/default.yaml'))
     trainer = Trainer(cfg)
+
+    # If you want to resume, uncomment below:
+    # trainer.fit(resume_path="experiments/exp1/last_epoch.pt")
+
     trainer.fit()
