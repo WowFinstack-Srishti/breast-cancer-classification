@@ -250,7 +250,7 @@ if __name__ == '__main__':
     trainer = Trainer(cfg)
 
     # If you want to resume, uncomment below:
-    trainer.fit(resume_path="experiments/exp1/last_epoch.pt")
+    # trainer.fit(resume_path="experiments/exp1/last_epoch.pt")
 
     # ✅ now supports early stopping (patience default = 7)
     trainer.fit()
