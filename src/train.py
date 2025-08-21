@@ -26,6 +26,7 @@ from src.models import ResNet50Fine, ViTModel
 from src.metrics import iou_from_masks
 from src.xai import XAIProcessor
 
+
 def setup_logging(experiment_name):
     log_dir = os.path.join('experiments', experiment_name)
     os.makedirs(log_dir, exist_ok=True)
@@ -38,12 +39,14 @@ def setup_logging(experiment_name):
     writer = SummaryWriter(log_dir)
     return writer
 
+
 def get_device():
     if torch.backends.mps.is_available():
         return torch.device('mps')
     if torch.cuda.is_available():
         return torch.device('cuda')
     return torch.device('cpu')
+
 
 def build_transforms(img_size=224):
     train_t = T.Compose([
@@ -62,12 +65,17 @@ def build_transforms(img_size=224):
     ])
     return train_t, val_t
 
+
 def load_model(cfg):
     if cfg['model']['type'] == 'resnet':
         model = ResNet50Fine(num_classes=cfg['model']['num_classes'])
     else:
-        model = ViTModel(model_name=cfg['model'].get('vit_name','vit_base_patch16_224'), num_classes=cfg['model']['num_classes'])
+        model = ViTModel(
+            model_name=cfg['model'].get('vit_name', 'vit_base_patch16_224'),
+            num_classes=cfg['model']['num_classes']
+        )
     return model
+
 
 class Trainer:
     def __init__(self, cfg):
@@ -79,15 +87,29 @@ class Trainer:
         self.train_ds = PatchDataset(cfg['data']['train_csv'], cfg['data']['img_dir'], transform=train_t)
         self.val_ds = PatchDataset(cfg['data']['val_csv'], cfg['data']['img_dir'], transform=val_t)
 
-        self.train_loader = DataLoader(self.train_ds, batch_size=cfg['training']['batch_size'], shuffle=True, num_workers=4, pin_memory=True)
-        self.val_loader = DataLoader(self.val_ds, batch_size=cfg['training']['batch_size'], shuffle=False, num_workers=4, pin_memory=True)
+        self.train_loader = DataLoader(
+            self.train_ds, batch_size=cfg['training']['batch_size'],
+            shuffle=True, num_workers=4, pin_memory=True
+        )
+        self.val_loader = DataLoader(
+            self.val_ds, batch_size=cfg['training']['batch_size'],
+            shuffle=False, num_workers=4, pin_memory=True
+        )
 
         self.model = load_model(cfg)
         self.model.to(self.device)
 
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.AdamW(self.model.parameters(), lr=cfg['training']['lr'], weight_decay=cfg['training'].get('weight_decay',1e-4))
-        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(1,cfg['training']['epochs']), eta_min=1e-6)
+        self.optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=cfg['training']['lr'],
+            weight_decay=cfg['training'].get('weight_decay',1e-4)
+        )
+        self.scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=max(1,cfg['training']['epochs']),
+            eta_min=1e-6
+        )
 
         self.xai_reg = cfg['training'].get('use_xai_reg', False)
         if self.xai_reg:
@@ -164,9 +186,11 @@ class Trainer:
         self.writer.add_scalar("Accuracy/val", acc, epoch)
         return val_loss, float(acc)
 
-    def fit(self, resume_path=None):
+    # ✅ Updated with Early Stopping
+    def fit(self, resume_path=None, patience=7):
         epochs = self.cfg['training']['epochs']
         start_epoch = 1
+        best_epoch = 0
 
         # Resume training if checkpoint is provided
         if resume_path is not None and os.path.exists(resume_path):
@@ -176,21 +200,29 @@ class Trainer:
             self.scheduler.load_state_dict(checkpoint["scheduler_state"])
             self.best_val = checkpoint.get("best_val", 0.0)
             start_epoch = checkpoint.get("epoch", 1)
+            best_epoch = start_epoch
             print(f"Resumed from {resume_path} at epoch {start_epoch}")
+
+        epochs_no_improve = 0
 
         for epoch in range(start_epoch, epochs+1):
             t0 = time.time()
             train_loss = self.train_epoch(epoch)
             val_loss, val_acc = self.validate(epoch)
             self.scheduler.step()
+
             print(f'Epoch {epoch} | Train loss {train_loss:.4f} | Val loss {val_loss:.4f} | Val acc {val_acc:.4f}')
 
             # Save best model
             if val_acc > self.best_val:
                 self.best_val = val_acc
+                best_epoch = epoch
+                epochs_no_improve = 0
                 best_path = os.path.join(self.cfg['training']['outdir'], f'best_{self.cfg["model"]["type"]}.pt')
                 torch.save(self.model.state_dict(), best_path)
                 print('Saved best model at', best_path)
+            else:
+                epochs_no_improve += 1
 
             # Always save last checkpoint
             last_path = os.path.join(self.cfg['training']['outdir'], "last_epoch.pt")
@@ -204,13 +236,21 @@ class Trainer:
             print("Saved checkpoint at", last_path)
 
             print('Elapsed', time.time()-t0, 'sec')
+
+            # ✅ Early stopping condition
+            if epochs_no_improve >= patience:
+                print(f"Early stopping at epoch {epoch}. Best val acc {self.best_val:.4f} at epoch {best_epoch}.")
+                break
+
         self.writer.close()
+
 
 if __name__ == '__main__':
     cfg = yaml.safe_load(open('configs/default.yaml'))
     trainer = Trainer(cfg)
 
     # If you want to resume, uncomment below:
-    # trainer.fit(resume_path="experiments/exp1/last_epoch.pt")
+    trainer.fit(resume_path="experiments/exp1/last_epoch.pt")
 
+    # ✅ now supports early stopping (patience default = 7)
     trainer.fit()
