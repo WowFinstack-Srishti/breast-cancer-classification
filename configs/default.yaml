@@ -7,7 +7,7 @@ data:
 
 model:
   type: resnet   # or vit
-  num_classes: 2  # adjust based on datasets (PCam=2, BreakHis=2, BACH=4)
+  num_classes: 4  # adjust based on datasets (PCam=2, BreakHis=2, BACH=4)
 
 training:
   outdir: experiments/exp1
