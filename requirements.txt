@@ -1,28 +1,37 @@
-#core
-torch>=2.2.0
-torchvision
-timm
+# --- Core Data Science & Utilities ---
+# For data manipulation, math, and general utilities
 numpy
 pandas
 scikit-learn
-opencv-python
 matplotlib
-Pillow
+tqdm
 PyYAML
-
-#explainibility
-captum
-shap
-scikit-image
-
-#wsi
-openslide-python
-
-#ui
-tk
-
-#optional
-tensorboard
+h5py
+notebook
 scipy
 seaborn
-h5py
+
+# --- Machine Learning (PyTorch) ---
+# The core ML framework and helper libraries
+torch>=2.2.0
+torchvision
+timm                 # (PyTorch Image Models)
+tensorboard          # (For logging experiments)
+
+# --- Image Processing (General, WSI, Stain) ---
+# For opening, manipulating, and normalizing images
+Pillow
+opencv-python
+scikit-image
+openslide-python     # (For reading Whole Slide Images)
+
+# --- Federated Learning ---
+flwr
+
+# --- Explainability (XAI) ---
+# For generating heatmaps and explanations
+captum               # (XAI for PyTorch)
+shap                 # (General XAI framework)
+
+# --- User Interface ---
+gradio
